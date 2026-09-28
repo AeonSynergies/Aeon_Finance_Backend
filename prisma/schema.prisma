@@ -1,0 +1,335 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A permission area. Each role grants read / write / edit per module
+/// (see src/permissions/permissions.catalog.ts for what each action allows).
+enum PermissionModule {
+  JOBS
+  UPLOADS
+  VALIDATION
+  APPROVALS
+  AUDIT
+  SETTINGS
+  TEAM
+}
+
+enum JobModule {
+  TIMECARD
+}
+
+enum DateApprovalStatus {
+  IN_PROGRESS
+  SENT_FOR_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum UploadDocType {
+  PAYROLL_TIMECARD
+  AMAZON_ACTIVITY
+  AMAZON_BREAK
+  EMPLOYEE_MASTER
+  PHYSICAL_TIMESHEET
+  WAVE_SCHEDULE
+}
+
+enum UploadStatus {
+  UPLOADED
+  PENDING
+  MISSING
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users       User[]
+  roles       Role[]
+  jobs        Job[]
+  settings    Settings?
+  invitations Invitation[]
+
+  @@map("organizations")
+}
+
+model Role {
+  id          String       @id @default(cuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  /// System roles (the org's Admin) have every permission and can't be edited or deleted.
+  isSystem    Boolean      @default(false)
+  /// Created with the organization (Admin / Manager / Executive); still editable unless isSystem.
+  isDefault   Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  permissions RolePermission[]
+  users       User[]
+  invitations Invitation[]
+
+  @@unique([orgId, name])
+  @@map("roles")
+}
+
+model RolePermission {
+  id       String           @id @default(cuid())
+  roleId   String
+  role     Role             @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  module   PermissionModule
+  canRead  Boolean          @default(false)
+  canWrite Boolean          @default(false)
+  canEdit  Boolean          @default(false)
+
+  @@unique([roleId, module])
+  @@map("role_permissions")
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  passwordHash String
+  name         String
+  orgId        String
+  org          Organization @relation(fields: [orgId], references: [id])
+  roleId       String
+  role         Role         @relation(fields: [roleId], references: [id])
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+
+  createdJobs       Job[]              @relation("JobCreatedBy")
+  submittedDates    DateApproval[]     @relation("DateApprovalSubmittedBy")
+  decidedDates      DateApproval[]     @relation("DateApprovalDecidedBy")
+  uploadedDocuments UploadedDocument[]
+  overrides         Override[]
+  auditEntries      AuditEntry[]
+  overriddenRows    TimecardRow[]      @relation("TimecardRowOverriddenBy")
+  sentInvitations   Invitation[]       @relation("InvitationInvitedBy")
+
+  @@index([orgId])
+  @@map("users")
+}
+
+model Employee {
+  id         String   @id @default(cuid())
+  employeeId String   @unique
+  name       String
+  dlNumber   String?  @unique
+  phone      String?
+  position   String   @default("DA")
+  station    String?
+  status     String   @default("active")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  timecardRows TimecardRow[]
+
+  @@map("employees")
+}
+
+model Job {
+  id          String       @id @default(cuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id])
+  jobId       String
+  module      JobModule    @default(TIMECARD)
+  frequency   String
+  periodStart DateTime     @db.Date
+  periodEnd   DateTime     @db.Date
+  processDate DateTime     @db.Date
+  createdById String
+  createdBy   User         @relation("JobCreatedBy", fields: [createdById], references: [id])
+  lockedAt    DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  dateApprovals     DateApproval[]
+  timecardRows      TimecardRow[]
+  uploadedDocuments UploadedDocument[]
+  auditEntries      AuditEntry[]
+
+  @@unique([orgId, jobId])
+  @@map("jobs")
+}
+
+model DateApproval {
+  id                String             @id @default(cuid())
+  jobId             String
+  job               Job                @relation(fields: [jobId], references: [id])
+  date              DateTime           @db.Date
+  status            DateApprovalStatus @default(IN_PROGRESS)
+  submittedById     String?
+  submittedBy       User?              @relation("DateApprovalSubmittedBy", fields: [submittedById], references: [id])
+  submittedAt       DateTime?
+  decidedById       String?
+  decidedBy         User?              @relation("DateApprovalDecidedBy", fields: [decidedById], references: [id])
+  decidedAt         DateTime?
+  rejectionComments String?
+
+  @@unique([jobId, date])
+  @@map("date_approvals")
+}
+
+model UploadedDocument {
+  id           String        @id @default(cuid())
+  jobId        String
+  job          Job           @relation(fields: [jobId], references: [id])
+  docType      UploadDocType
+  fileName     String
+  checksum     String
+  version      Int           @default(1)
+  date         DateTime?     @db.Date
+  fileContent  Bytes
+  parsedData   Json?
+  uploadedById String
+  uploadedBy   User          @relation(fields: [uploadedById], references: [id])
+  uploadedAt   DateTime      @default(now())
+  status       UploadStatus  @default(UPLOADED)
+
+  @@unique([jobId, docType, checksum])
+  @@map("uploaded_documents")
+}
+
+model TimecardRow {
+  id             String    @id @default(cuid())
+  jobId          String
+  job            Job       @relation(fields: [jobId], references: [id])
+  date           DateTime  @db.Date
+  employeeId     String?
+  employee       Employee? @relation(fields: [employeeId], references: [id])
+  rawPayrollName String
+  rawAmazonName  String?
+  phone          String?
+  position       String?
+  earnCode       String?
+
+  payLogin    String?
+  payLogout   String?
+  payBreakOut String?
+  payBreakIn  String?
+  payLogins   Json    @default("[]")
+  payLogouts  Json    @default("[]")
+  payBreaks   Json    @default("[]")
+
+  appLogin      String?
+  appLogout     String?
+  physicalLogin String?
+  lastStop      String?
+  amazonBreaks  Json    @default("[]")
+
+  validationStatus         String
+  triggeredRule            Int?
+  additionalTriggeredRules Json    @default("[]")
+  detail                   String?
+
+  overrideNote   String?
+  overriddenById String?
+  overriddenBy   User?     @relation("TimecardRowOverriddenBy", fields: [overriddenById], references: [id])
+  overriddenAt   DateTime?
+
+  approvalStatus ApprovalStatus @default(PENDING)
+  approverNotes  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  overrides Override[]
+
+  @@unique([jobId, date, rawPayrollName])
+  @@index([jobId, date])
+  @@map("timecard_rows")
+}
+
+model Override {
+  id             String      @id @default(cuid())
+  timecardRowId  String
+  timecardRow    TimecardRow @relation(fields: [timecardRowId], references: [id])
+  userId         String
+  user           User        @relation(fields: [userId], references: [id])
+  previousStatus String
+  newStatus      String
+  reason         String
+  note           String?
+  createdAt      DateTime    @default(now())
+
+  @@map("overrides")
+}
+
+model Settings {
+  id    String       @id @default(cuid())
+  orgId String       @unique
+  org   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  waveLoginBufferMins                Int @default(5)
+  amazonLoginBufferMins              Int @default(30)
+  physicalLoginBufferMins            Int @default(5)
+  mealBreakBufferMins                Int @default(2)
+  logoutBufferMins                   Int @default(15)
+  amazonAutoLogoutEstimateBufferMins Int @default(30)
+
+  ptoEarnCodes      String[] @default(["PTO"])
+  bonusEarnCodes    String[] @default(["BON", "BNH"])
+  trainingEarnCodes String[] @default(["TRN"])
+  vtoEarnCodes      String[] @default(["VTO"])
+
+  fuzzyAmazonMatchThreshold      Float @default(0.75)
+  fuzzyBreakReportMatchThreshold Float @default(0.60)
+
+  mealWaiverExemptStates String[] @default(["CA", "TX"])
+
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model AuditEntry {
+  id            String   @id @default(cuid())
+  jobId         String?
+  job           Job?     @relation(fields: [jobId], references: [id])
+  timecardRowId String?
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  action        String
+  detail        String
+  createdAt     DateTime @default(now())
+
+  @@map("audit_entries")
+}
+
+/// An invitation to join an organization with a role. Only a SHA-256 hash of
+/// the one-time token is stored; the raw token lives in the invite link.
+model Invitation {
+  id          String       @id @default(cuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  email       String
+  name        String?
+  roleId      String
+  role        Role         @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  tokenHash   String       @unique
+  invitedById String
+  invitedBy   User         @relation("InvitationInvitedBy", fields: [invitedById], references: [id])
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime     @default(now())
+
+  @@index([orgId, email])
+  @@map("invitations")
+}
